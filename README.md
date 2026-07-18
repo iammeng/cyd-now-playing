@@ -1,80 +1,108 @@
-# Spotify CYD — จอแสดงเพลงที่กำลังเล่น
+# Spotify CYD — Now Playing Display
 
-จอ Now Playing ของ Spotify บนบอร์ด CYD (ESP32-2432S028R) แสดงปกอัลบั้ม ชื่อเพลง/ศิลปิน (รองรับภาษาไทย) พร้อมปุ่มทัชควบคุมเพลง โทนสีหน้าจอเปลี่ยนตามสีปกอัลบั้มอัตโนมัติ
+🇹🇭 [อ่านภาษาไทย](README.th.md) · 📖 [Full setup guide](docs/SETUP.md) · 📝 [Changelog](CHANGELOG.md)
+
+A Spotify Now Playing display for the "Cheap Yellow Display" board
+(ESP32-2432S028R): album art, track/artist/album names (Thai supported),
+full touch playback controls, and a UI that tints itself to the album art's
+dominant color.
 
 ```
-Spotify API ── Mac mini (server/) ── LAN ── CYD (firmware/)
+Spotify API ── Mac/PC on the LAN (server/) ── plain HTTP ── CYD board (firmware/)
 ```
 
-Mac mini รัน server เล็ก ๆ ทำหน้าที่ OAuth + ย่อปกอัลบั้มเป็น RGB565 ให้บอร์ด ตัวบอร์ดจึงไม่ต้องยุ่งกับ TLS/JPEG เลย
+A small companion server handles Spotify OAuth and converts album art to raw
+RGB565 for the board, so the ESP32 never has to deal with TLS or JPEG
+decoding.
 
-> 📖 **คู่มือฉบับละเอียด** (สถาปัตยกรรม, network, auth, troubleshooting): [docs/SETUP.md](docs/SETUP.md)
+## First-time setup
 
-## ติดตั้งครั้งแรก
+### 1. Create a Spotify app
 
-### 1. สร้าง Spotify App
+1. Go to https://developer.spotify.com/dashboard → **Create app**
+2. Set the **Redirect URI** to `http://127.0.0.1:8888/callback` (must match exactly)
+3. Note the Client ID / Client Secret
 
-1. ไปที่ https://developer.spotify.com/dashboard → Create app
-2. ตั้ง **Redirect URI** เป็น `http://127.0.0.1:8888/callback` (ต้องตรงเป๊ะ)
-3. จด Client ID / Client Secret
-
-### 2. ตั้งค่า server (บน Mac mini)
+### 2. Set up the server (on the always-on machine)
 
 ```bash
 cd server
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python app.py          # รันครั้งแรกเพื่อสร้าง config.json แล้วหยุด
-# แก้ config.json ใส่ client_id / client_secret
-.venv/bin/python auth.py         # เปิด browser ล็อกอิน Spotify ครั้งเดียว
-.venv/bin/python app.py          # เริ่ม server ที่พอร์ต 8080
+.venv/bin/python app.py          # first run creates config.json, then stops
+# edit config.json: fill in client_id / client_secret
+.venv/bin/python auth.py         # one-time Spotify login in your browser
+.venv/bin/python app.py          # serves on port 8080
 ```
 
-ทดสอบ: เปิดเพลงใน Spotify แล้ว `curl http://127.0.0.1:8080/now`
+Test: play something in Spotify, then `curl http://127.0.0.1:8080/now`
 
-ให้รันถาวรด้วย Docker (ต้องทำ `auth.py` บน host ก่อนเสมอ เพราะ container เปิด browser ไม่ได้):
+For a permanent install use Docker (always run `auth.py` on the host first —
+the container cannot open a browser):
 
 ```bash
 docker compose up -d --build
-# ดู log: docker logs -f spotify-cyd
+# logs: docker logs -f spotify-cyd
 ```
 
-Container ตั้ง `restart: unless-stopped` + Docker Desktop เปิด AutoStart ไว้ → กลับมาเองหลังรีบูต Mac (ทางเลือก: ใช้ launchd ผ่าน `server/com.kritsadas.spotify-cyd.plist` ถ้าไม่อยากพึ่ง Docker)
+The container is set to `restart: unless-stopped`; enable Docker Desktop's
+start-at-login and it survives reboots. (Alternative: launchd via
+`server/com.kritsadas.spotify-cyd.plist` if you'd rather not use Docker.)
 
-### 3. Flash บอร์ด
+### 3. Flash the board
 
 ```bash
 cd firmware
-pio run -t upload                # สาย USB (พอร์ต /dev/cu.usbserial-230)
-pio run -e cyd_ota -t upload     # รอบถัดไปผ่าน WiFi (spotify-cyd.local)
+pio run -t upload                # first time over USB
+pio run -e cyd_ota -t upload --upload-port <board-ip>   # later, over WiFi
 ```
 
-บูตครั้งแรกบอร์ดเปิด AP ชื่อ **Spotify-CYD-Setup** → ต่อแล้วเปิด `192.168.4.1` เลือก WiFi และตั้ง **Server IP** (ค่า default `192.168.1.195` = Mac mini)
+On first boot the board opens an access point named **Spotify-CYD-Setup** —
+connect to it, open `192.168.4.1`, pick your WiFi, and set the **Server IP**
+(default `192.168.1.195`).
 
-## การใช้งาน
+## Using it
 
-- **แตะซ้าย** = เพลงก่อนหน้า, **แตะกลาง** = เล่น/หยุด, **แตะขวา** = เพลงถัดไป
-- จอหรี่อัตโนมัติ 23:00–07:00 — แตะจอเพื่อปลุกให้สว่างเต็ม 5 นาที (แตะแรกตอนหรี่ = ปลุกอย่างเดียว ไม่เปลี่ยนเพลง)
-- ไม่มีเพลงเล่น → แสดงนาฬิกา
+- **Control row** (bottom): shuffle · previous · play/pause · next · repeat —
+  shuffle/repeat icons light up in the album accent color when active
+- **Tap the progress bar** to jump to that position in the track
+- **Swipe up/down** anywhere to change volume ±10% (a volume bar appears
+  briefly in place of the progress bar)
+- **Auto-brightness**: the backlight follows the room's light via the CYD's
+  onboard light sensor; touching a dimmed screen wakes it to full brightness
+  for 5 minutes (the first touch only wakes — it never skips a track)
+- Nothing playing → clock screen (tap thirds: previous / play-pause / next)
+
+Notes: playback commands require **Spotify Premium** and an active device.
+Setting the volume is rejected by Spotify on some targets (e.g. an iPhone as
+the playback device).
 
 ## Endpoints
 
-| ที่ | endpoint | ทำอะไร |
+| Where | Endpoint | What it does |
 |---|---|---|
-| server | `GET /now` | JSON เพลงปัจจุบัน + `theme565` สีธีมจากปก |
-| server | `GET /art/<id>?size=130` | ปกอัลบั้มเป็น raw RGB565 big-endian |
-| server | `POST /playpause` `/next` `/previous` | สั่งเพลง |
-| บอร์ด | `GET /screen` | screenshot จอ (ใช้ `tools/capture.py`) |
-| บอร์ด | `GET /server?h=IP` | เปลี่ยน server IP แล้วรีบูต |
-| บอร์ด | `GET /test` | หน้าทดสอบจอ 2 นาที (แถบ RGBW + gradient เทียบ drawPixel/pushImage) |
-| บอร์ด | `GET /flip` | พลิกภาพ 180° (สลับทิศมุมมองที่ดีของจอ TN) แล้วรีบูต |
-| บอร์ด | `GET /artbuf` | dump บัฟเฟอร์ปกอัลบั้มในเครื่อง (debug) |
+| server | `GET /now` | Current-track JSON incl. `theme565`, `volume`, `shuffle`, `repeat` |
+| server | `GET /art/<id>?size=130` | Album art as raw RGB565 big-endian |
+| server | `POST /playpause` `/next` `/previous` | Playback commands |
+| server | `POST /seek?ms=N` | Jump to position |
+| server | `POST /volume?delta=N` (or `?set=N`) | Adjust volume 0–100 |
+| server | `POST /shuffle` / `POST /repeat` | Toggle shuffle / cycle repeat mode |
+| board | `GET /screen` | Live screenshot (use `tools/capture.py`) |
+| board | `GET /server?h=IP` | Change server IP and reboot |
+| board | `GET /test` | 2-minute display test pattern |
+| board | `GET /flip` | Rotate the display 180° and reboot |
+| board | `GET /ldr` | Light-sensor reading + current backlight duty |
+| board | `GET /touch` | Last touch gesture (calibration aid) |
+| board | `GET /artbuf` | Dump the on-device art buffer (debug) |
 
-หมายเหตุ: ถ้าใช้บอร์ด CYD รุ่นมี USB 2 ช่อง (จอ ST7789) ให้ build ด้วย `pio run -e cyd2usb -t upload` แทน
+Note: for the 2-USB-port CYD variant (ST7789 panel) build with
+`pio run -e cyd2usb -t upload` instead.
 
-## โครงสร้าง
+## Layout
 
 - `server/` — Flask + spotipy + Pillow (Python)
-- `firmware/` — PlatformIO, TFT_eSPI + OpenFontRender (ฟอนต์ Kanit ฝังใน `src/kanit_font.h`)
-- `tools/capture.py` — ดึง screenshot จริงจากจอ: `python3 tools/capture.py spotify-cyd.local`
+- `firmware/` — PlatformIO, TFT_eSPI + OpenFontRender (Kanit font embedded in `src/kanit_font.h`)
+- `tools/capture.py` — pull a real screenshot from the board: `python3 tools/capture.py <board-ip>`
 
-ฟอนต์: [Kanit](https://github.com/cadsondemak/kanit) (OFL) subset เฉพาะ **Latin + ไทย** (~26KB) — ชื่อเพลงภาษาญี่ปุ่น/เกาหลี/จีนจะแสดงเป็นช่องว่าง (ไม่มี glyph ในฟอนต์)
+Font: [Kanit](https://github.com/cadsondemak/kanit) (OFL), subset to
+**Latin + Thai** (~26 KB). Titles in Japanese/Korean/Chinese currently render
+as blanks — CJK support via server-side text rendering is on the roadmap.

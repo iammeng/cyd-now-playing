@@ -1,377 +1,470 @@
-# Spotify CYD — คู่มือฉบับละเอียด
+# Spotify CYD — Full Setup Guide
 
-เอกสารนี้อธิบายทุกส่วนของระบบ: สถาปัตยกรรม, ความสัมพันธ์ระหว่าง server กับบอร์ด, network, การตั้งค่า Spotify Developer Dashboard, กลไก auth, ขั้นตอนติดตั้งตั้งแต่ศูนย์, และการแก้ปัญหา
+🇹🇭 [อ่านภาษาไทย](SETUP.th.md)
+
+This document explains every part of the system: the architecture, how the
+server and the board talk to each other, networking, the Spotify Developer
+Dashboard setup, the auth mechanism, a from-scratch install, and
+troubleshooting.
 
 ---
 
-## 1. ภาพรวมสถาปัตยกรรม
+## 1. Architecture overview
 
-ระบบมี 3 ส่วน ทำงานร่วมกันแบบนี้:
+The system has three parts:
 
 ```
-┌─────────────────┐   HTTPS + OAuth    ┌──────────────────────┐   HTTP ธรรมดา (LAN)   ┌─────────────────┐
-│  Spotify Cloud  │ ←───────────────→  │  Mac mini (server/)  │ ←──────────────────→  │  บอร์ด CYD       │
+┌─────────────────┐   HTTPS + OAuth    ┌──────────────────────┐    plain HTTP (LAN)   ┌─────────────────┐
+│  Spotify Cloud  │ ←───────────────→  │  Server machine      │ ←──────────────────→  │  CYD board       │
 │  Web API        │                    │  Docker: spotify-cyd │                       │  (firmware/)     │
-│                 │                    │  Flask พอร์ต 8080     │                       │  ESP32-2432S028R │
+│                 │                    │  Flask on port 8080  │                       │  ESP32-2432S028R │
 └─────────────────┘                    └──────────────────────┘                       └─────────────────┘
-     ต้องมี token                        ทำงานหนักทั้งหมด:                                ทำงานเบา:
-     ต้องใช้ TLS                          - เก็บ/ต่ออายุ token                             - ดึง JSON ทุก 2 วิ
-                                          - poll เพลงปัจจุบัน                              - วาดจอ + รับทัช
-                                          - ย่อปก + แปลง RGB565                           - ส่งคำสั่งเพลง
-                                          - คำนวณสีธีมจากปก
+   needs a token                         does the heavy lifting:                        stays lightweight:
+   needs TLS                             - stores/refreshes tokens                      - polls JSON every 2 s
+                                         - polls current playback                       - draws UI + reads touch
+                                         - resizes art, converts RGB565                 - sends playback commands
+                                         - computes theme color from art
 ```
 
-**ทำไมต้องมี server ตรงกลาง — เหตุผล 3 ข้อ:**
+**Why a server in the middle — three reasons:**
 
-1. **กฎ OAuth ใหม่ของ Spotify (บังคับ พ.ย. 2025):** redirect URI ต้องเป็น HTTPS หรือ loopback (`http://127.0.0.1:...`) เท่านั้น → ESP32 ทำ login flow เองบนตัวบอร์ดไม่ได้อีกแล้ว ต้องมีเครื่องที่เปิด browser ได้ทำ auth แทน
-2. **RAM ของบอร์ดจำกัด (ไม่มี PSRAM):** การต่อ TLS ไป Spotify + decode JPEG ปกอัลบั้มบนบอร์ดกินแรม/ซับซ้อน server จึงย่อรูปและแปลงเป็น **raw RGB565** ให้บอร์ดเอาไปวาดตรง ๆ โดยไม่ต้อง decode อะไรเลย
-3. **ลด rate limit:** server cache ผล API และรูปไว้ บอร์ด poll กี่รอบก็ไม่กระทบโควต้า Spotify
+1. **Spotify's OAuth rules (enforced Nov 2025):** redirect URIs must be HTTPS
+   or loopback (`http://127.0.0.1:...`) only → an ESP32 can no longer run the
+   login flow on-device; a machine with a browser must do auth on its behalf.
+2. **Limited board RAM (no PSRAM):** TLS to Spotify plus JPEG decoding on the
+   board is heavy and complex. The server resizes art and converts it to
+   **raw RGB565** so the board just draws bytes with zero decoding.
+3. **Rate limiting:** the server caches API results and images, so the board
+   can poll as often as it likes without touching Spotify quotas.
 
 ---
 
-## 2. ความสัมพันธ์ server ↔ board (data flow)
+## 2. Server ↔ board data flow
 
-### 2.1 วงจรหลัก (ทุก 2 วินาที)
+### 2.1 Main loop (every 2 seconds)
 
 ```
-บอร์ด                                 server                              Spotify
+board                                 server                              Spotify
   │  GET /now                           │                                    │
-  │ ───────────────────────────────→    │  (ถ้า cache เก่ากว่า 1.5 วิ)          │
+  │ ───────────────────────────────→    │  (if cache older than 1.5 s)       │
   │                                     │  GET /me/player ────────────────→  │
   │                                     │  ←──────────────── playback JSON   │
   │  ←─────────────── JSON:             │                                    │
   │  {title, artists, album,            │                                    │
   │   is_playing, progress_ms,          │                                    │
-  │   duration_ms, art_id,              │                                    │
-  │   theme565, ok}                     │                                    │
+  │   duration_ms, art_id, theme565,    │                                    │
+  │   volume, shuffle, repeat, ok}      │                                    │
 ```
 
-- บอร์ดเทียบ `art_id` กับปกที่โหลดไว้ ถ้าเปลี่ยน → ขอปกใหม่ (ข้อ 2.2)
-- `theme565` = สีเด่นของปกในรูปแบบ RGB565 (16-bit int) — บอร์ดใช้ทำสีปุ่ม กรอบ แถบโปรเกรส และย้อมพื้นหลัง
-- ระหว่างรอ poll รอบถัดไป บอร์ด interpolate `progress_ms` เองในเครื่อง แถบโปรเกรสจึงเดินลื่นทุกวินาทีโดยไม่ต้องยิง network ถี่
-- โพลรอบแรกหลังเพลงเปลี่ยน `theme565` อาจเป็น 0 (server ยังคำนวณไม่เสร็จ — ทำใน background thread) รอบถัดไปจะได้ค่าจริง
+- The board compares `art_id` with the loaded art; if it changed it fetches
+  new art (§2.2).
+- `theme565` = the art's dominant color as an RGB565 16-bit int — used for
+  buttons, frames, the progress bar, and the background tint.
+- `volume` (0–100, or -1 = unknown), `shuffle` (bool), `repeat` (0=off,
+  1=context, 2=track) — drive the icon states and the volume overlay.
+- Between polls the board interpolates `progress_ms` locally, so the progress
+  bar advances smoothly every second without extra network traffic.
+- On the first poll after a track change `theme565` may be 0 (the server
+  computes it in a background thread); the next poll returns the real value.
 
-### 2.2 การโหลดปกอัลบั้ม
-
-```
-บอร์ด: GET /art/<art_id>?size=130
-server: ดาวน์โหลดปก 300px จาก Spotify CDN (ครั้งแรกครั้งเดียว, cache 8 รูปล่าสุด)
-        → ย่อเหลือ 130×130 (LANCZOS)
-        → Floyd-Steinberg dithering (พรางรอยขั้นสีบนจอ 65,536 สี)
-        → แปลงเป็น raw RGB565 big-endian = 130×130×2 = 33,800 bytes เป๊ะ
-บอร์ด: stream ลง buffer ในแรม → pushImage ขึ้นจอทันที
-```
-
-**เรื่อง byte order (สำคัญ — เคยเป็นบั๊ก):** server ส่ง big-endian ซึ่ง*ตรงกับลำดับที่ SPI ต้องส่งขึ้นสายอยู่แล้ว* ดังนั้นฝั่งบอร์ดต้องวาดด้วย `setSwapBytes(false)` — ห้ามเปิด swap เด็ดขาด (ต่างจากภาพที่ฝังเป็น PROGMEM array แบบ btc-ticker ที่เก็บเป็นค่าตัวเลข native ซึ่งต้องใช้ `setSwapBytes(true)`) ถ้าเปิดผิดจะเป็นการสลับ byte ซ้ำสองรอบ → ปกกลายเป็นลายรุ้งทั้งใบ
-
-### 2.3 คำสั่งควบคุมเพลง (จากทัช)
+### 2.2 Album art loading
 
 ```
-แตะจอ (ซ้าย/กลาง/ขวา) → บอร์ด POST /previous | /playpause | /next
-                       → server เรียก Spotify API แทน (พร้อม token)
-                       → server รอ 0.3 วิ ให้สถานะนิ่ง แล้ว refresh
-                       → ตอบ JSON สถานะใหม่กลับ (โครงเดียวกับ /now) → บอร์ดวาดจอทันที
+board:  GET /art/<art_id>?size=130
+server: downloads the 300px art from the Spotify CDN (once; caches last 8)
+        → resizes to 130×130 (LANCZOS)
+        → Floyd–Steinberg dithering (hides banding on the 65,536-color panel)
+        → converts to raw RGB565 big-endian = 130×130×2 = 33,800 bytes exactly
+board:  streams it into a RAM buffer → pushImage straight to the display
 ```
 
-หมายเหตุ: คำสั่งเหล่านี้ต้องมี **Spotify Premium** และต้องมี "active device" (มีเครื่องที่กำลังเล่นเพลงอยู่) ไม่งั้น Spotify ตอบ 403/404 ซึ่ง server จะกลืน error ไว้ให้ (log อย่างเดียว)
+**Byte order (important — was once a bug):** the server sends big-endian,
+which is *already the order SPI puts on the wire*, so the board must draw
+with `setSwapBytes(false)`. Never enable swapping (unlike PROGMEM image
+arrays stored as native values, which need `setSwapBytes(true)`). Getting it
+wrong double-swaps the bytes and turns the art into rainbow noise.
 
-### 2.4 การแบ่งงานสองคอร์ในบอร์ด
+### 2.3 Playback commands (from touch)
+
+```
+touch on screen → board sets pendingCmd → netTask POSTs to the server:
+  5-zone control row → /shuffle | /previous | /playpause | /next | /repeat
+  tap on progress bar → /seek?ms=<position>
+  vertical swipe → /volume?delta=±10
+→ server calls the Spotify API (with the token)
+→ server waits 0.3 s for the state to settle, then refreshes
+→ replies with fresh state JSON (same shape as /now) → board redraws
+```
+
+Note: these commands require **Spotify Premium** and an "active device"
+(something currently playing). Otherwise Spotify returns 403/404, which the
+server swallows (logs only). Setting the volume is rejected on some target
+devices (e.g. an iPhone as the playback device).
+
+### 2.4 Dual-core split on the board
 
 ```
 Core 0 (netTask)                       Core 1 (loop)
-- poll /now ทุก 2 วิ                    - วาดจอทั้งหมด (คอร์เดียวเท่านั้น — TFT ไม่ thread-safe)
-- โหลด /art เมื่อปกเปลี่ยน               - อ่านทัช → ตั้ง pendingCmd
-- ส่ง POST คำสั่งเพลง                    - progress tick ทุก 1 วิ
-- อัปเดต state + ตั้ง dirty flags        - เช็ค dirty flags → วาดเฉพาะส่วนที่เปลี่ยน
-        └──── สื่อสารผ่าน volatile flags + mutex (stateMux) ────┘
+- polls /now every 2 s                 - all drawing (single core only — TFT is not thread-safe)
+- fetches /art on art change           - reads touch (press/release + swipe) → sets pendingCmd
+- POSTs playback commands              - progress tick every 1 s + ambient-light backlight update
+- updates state + dirty flags          - checks dirty flags → redraws only what changed
+        └──── communicate via volatile flags + a mutex (stateMux) ────┘
 ```
 
 ---
 
-## 3. Network
+## 3. Networking
 
-### 3.1 ผังเครือข่าย
+### 3.1 Network map
 
-| เครื่อง | ที่อยู่ | หมายเหตุ |
+| Machine | Address | Notes |
 |---|---|---|
-| Mac mini (server) | `192.168.1.195` พอร์ต **8080** | ค่านี้ฝังเป็น default ใน firmware |
-| บอร์ด CYD | DHCP (ล่าสุด `192.168.1.188`) พอร์ต **80** | เปลี่ยนได้เมื่อ router แจกใหม่ |
-| mDNS ของบอร์ด | `spotify-cyd.local` | ใช้ได้บ้างไม่ได้บ้าง (ดู 3.3) |
+| Server | `192.168.1.195`, port **8080** | baked into the firmware as the default |
+| CYD board | DHCP, port **80** | can change when the router reassigns — set a reservation |
+| Board mDNS | `spotify-cyd.local` | flaky (see 3.3) |
 
-ทุกอย่างวิ่งบน LAN เดียวกันด้วย **HTTP ธรรมดา ไม่มี TLS** — ยอมรับได้เพราะเป็นเครือข่ายในบ้าน ข้อมูลที่วิ่งคือชื่อเพลง/รูปปก ไม่มี secret (token อยู่บน Mac mini เท่านั้น ไม่เคยถูกส่งให้บอร์ด)
+Everything runs on the same LAN over **plain HTTP, no TLS** — acceptable for
+a home network: the traffic is track names and cover art, no secrets (tokens
+live only on the server and are never sent to the board).
 
-### 3.2 บอร์ดรู้จัก server ได้ยังไง
+### 3.2 How the board finds the server
 
-ลำดับความสำคัญ:
-1. ค่าที่เก็บใน NVS (flash ของบอร์ด) key `server` namespace `scyd`
-2. ถ้าไม่เคยตั้ง → default `192.168.1.195` (กำหนดใน `firmware/src/main.cpp` → `DEFAULT_SERVER`)
+Priority order:
+1. The value stored in NVS (board flash), key `server`, namespace `scyd`
+2. Otherwise → default `192.168.1.195` (`DEFAULT_SERVER` in
+   `firmware/src/main.cpp`)
 
-วิธีเปลี่ยมี 2 ทาง:
-- เปิด `http://<ip บอร์ด>/server?h=<ip ใหม่>` → บันทึกแล้วรีบูตทันที
-- ผ่านหน้า WiFiManager portal (ช่อง "Server IP (Mac mini)") ตอน setup WiFi ใหม่
+Two ways to change it:
+- open `http://<board-ip>/server?h=<new-ip>` → saves and reboots immediately
+- via the WiFiManager portal ("Server IP" field) during WiFi setup
 
-**ควรตั้ง DHCP reservation ให้ Mac mini** ที่ router (ผูก MAC → 192.168.1.195 ถาวร) ไม่งั้นถ้า Mac เปลี่ยน IP บอร์ดจะหา server ไม่เจอ
+**Give the server machine a DHCP reservation** on your router (pin its MAC to
+a fixed IP); otherwise the board loses the server when the IP changes.
 
-### 3.3 การหาบอร์ดเจอ (เมื่อ IP เปลี่ยน)
+### 3.3 Finding the board (when its IP changes)
 
-- ลอง `ping spotify-cyd.local` ก่อน (mDNS — บางทีใช้ได้)
-- ถ้าไม่ได้ ให้กวาดหา endpoint เฉพาะของบอร์ด:
+- Try `ping spotify-cyd.local` first (mDNS — sometimes works)
+- Otherwise sweep for a board-specific endpoint:
   ```bash
-  for i in $(seq 2 254); do (curl -s --max-time 1 "http://192.168.1.$i/server" | grep -q "^server=" && echo "บอร์ดอยู่ที่ 192.168.1.$i") & done; wait
+  for i in $(seq 2 254); do (curl -s --max-time 1 "http://192.168.1.$i/ldr" | grep -q "^ldr=" && echo "board at 192.168.1.$i") & done; wait
   ```
-- หรือดูใน ARP: `arp -a | grep -i "e4:65:b8"` (OUI ของ Espressif)
-- จะตั้ง DHCP reservation ให้บอร์ดด้วยก็ยิ่งดี — จะได้ OTA ไป IP เดิมได้ตลอด
+- Or check ARP: `arp -a | grep -i "e4:65:b8"` (an Espressif OUI)
+- **Careful if you have several ESP32 boards on the LAN** — do not trust a
+  remembered IP; verify with a board-specific endpoint (`/ldr`, `/artbuf`)
+  before OTA-flashing anything.
+- A DHCP reservation for the board helps too — OTA then always targets the
+  same IP.
 
-### 3.4 บอร์ดต่อ WiFi ยังไง (ครั้งแรก / เปลี่ยนบ้าน)
+### 3.4 How the board joins WiFi (first boot / new network)
 
-Firmware ใช้ WiFiManager:
-1. บูตแล้วพยายามต่อ WiFi ที่เคยจำไว้ (เก็บใน NVS โดย WiFi stack — รอด reflash)
-2. ต่อไม่ได้ภายใน ~15 วิ × 5 ครั้ง → เปิด Access Point ชื่อ **`Spotify-CYD-Setup`** พร้อมโชว์คำแนะนำบนจอ
-3. เอามือถือต่อ AP นั้น → เปิด `192.168.4.1` → เลือก WiFi บ้าน + ใส่รหัส + (แก้ Server IP ได้ในหน้าเดียวกัน) → Save
-4. portal เปิดค้างเกิน 3 นาทีไม่มีใครตั้งค่า → บอร์ดรีบูตแล้วลองใหม่
+The firmware uses WiFiManager:
+1. On boot it tries the remembered WiFi (stored in NVS by the WiFi stack —
+   survives reflashing).
+2. If it can't connect within ~15 s × 5 retries → it opens an access point
+   named **`Spotify-CYD-Setup`** and shows instructions on screen.
+3. Join that AP with your phone → open `192.168.4.1` → pick your home WiFi +
+   password (+ optionally change the Server IP on the same page) → Save.
+4. If the portal sits unconfigured for 3 minutes → the board reboots and
+   retries.
 
 ---
 
 ## 4. Spotify Developer Dashboard
 
-### 4.1 สร้าง App (ทำครั้งเดียว)
+### 4.1 Create the app (once)
 
-1. เข้า https://developer.spotify.com/dashboard → login ด้วยบัญชี Spotify ปกติ → **Create app**
-2. กรอกฟอร์ม:
-   - **App name:** อะไรก็ได้ **แต่ห้ามขึ้นต้นด้วย "Spot"** (กฎของ Spotify) เช่น `cyd-now-playing`
-   - **App description:** อะไรก็ได้
-   - **Website:** เว้นว่างได้
-   - **Redirect URIs:** พิมพ์ `http://127.0.0.1:8888/callback` แล้ว **ต้องกดปุ่ม Add** ก่อน Save (พิมพ์ค้างไว้เฉย ๆ ไม่ถูกบันทึก)
-   - **Which API/SDKs:** ติ๊กเฉพาะ **Web API**
-3. เข้า app → **Settings** → คัดลอก **Client ID** และกด View client secret → คัดลอก **Client Secret**
+1. Go to https://developer.spotify.com/dashboard → log in with your normal
+   Spotify account → **Create app**
+2. Fill the form:
+   - **App name:** anything, **but it must not start with "Spot"** (Spotify's
+     rule) — e.g. `cyd-now-playing`
+   - **App description:** anything
+   - **Website:** can be left empty
+   - **Redirect URIs:** type `http://127.0.0.1:8888/callback` and **press
+     Add** before saving (text left in the field without Add is not saved)
+   - **Which API/SDKs:** tick **Web API** only
+3. Open the app → **Settings** → copy the **Client ID**, then View client
+   secret → copy the **Client Secret**
 
-### 4.2 กฎ Redirect URI (เหตุผลที่ต้อง 127.0.0.1)
+### 4.2 Redirect-URI rules (why 127.0.0.1)
 
-ตั้งแต่ พ.ย. 2025 Spotify บังคับทุก app:
-- ❌ `http://localhost:8888/callback` — ห้ามใช้คำว่า localhost
-- ❌ `http://192.168.x.x/callback` — ห้าม HTTP ไปยัง IP ทั่วไป (นี่คือสิ่งที่ทำให้โปรเจกต์ ESP32 เก่า ๆ ที่ login บนบอร์ดพังหมด)
-- ✅ `http://127.0.0.1:8888/callback` — loopback IP ตัวเลขเท่านั้นที่ยกเว้น
-- ✅ `https://...` — ต้องมี cert จริง (ยุ่งยากเกินจำเป็นสำหรับงานนี้)
+Since Nov 2025 Spotify enforces for every app:
+- ❌ `http://localhost:8888/callback` — the word "localhost" is banned
+- ❌ `http://192.168.x.x/callback` — plain HTTP to arbitrary IPs is banned
+  (this is what broke all the older login-on-the-ESP32 projects)
+- ✅ `http://127.0.0.1:8888/callback` — only the numeric loopback IP is
+  exempt
+- ✅ `https://...` — needs a real certificate (overkill for this)
 
-ค่านี้ต้อง**ตรงเป๊ะทุกตัวอักษร**กับที่อยู่ใน `server/config.json` (`redirect_uri`) — ไม่ตรง = error `INVALID_CLIENT: Invalid redirect URI`
+The value must match `server/config.json` (`redirect_uri`) **character for
+character** — otherwise you get `INVALID_CLIENT: Invalid redirect URI`.
 
-### 4.3 โหมด Development
+### 4.3 Development mode
 
-App ใหม่อยู่ในโหมด development: ใช้ได้กับบัญชีเจ้าของ + ผู้ใช้ที่ add ไว้ (สูงสุด 25 คน) — สำหรับจอส่วนตัวแบบนี้ไม่ต้องทำอะไรเพิ่ม ใช้บัญชีตัวเองได้เลย
+New apps are in development mode: usable by the owner plus up to 25 invited
+users. For a personal display nothing more is needed — just use your own
+account.
 
 ---
 
-## 5. Auth — กลไกและวงจรชีวิตของ token
+## 5. Auth — mechanism and token lifecycle
 
-### 5.1 Flow ครั้งแรก (ต้องทำบน Mac mini เท่านั้น)
+### 5.1 First-time flow (must run on the server machine)
 
 ```
-คุณรัน server/auth.py บน Mac mini
-  1. spotipy เปิด listener เล็ก ๆ รอที่ 127.0.0.1:8888 (ในเครื่องเอง)
-  2. เปิด browser ไปหน้า authorize ของ Spotify (แนบ client_id + scopes + redirect_uri)
-  3. คุณกด "Agree" ในเบราว์เซอร์
-  4. Spotify สั่ง browser redirect ไป http://127.0.0.1:8888/callback?code=XXXX
-     → browser วิ่งกลับเข้าเครื่องตัวเอง → listener ของ spotipy รับ code
-  5. spotipy เอา code + client_secret ไปแลก access_token + refresh_token
-  6. เก็บทั้งคู่ลงไฟล์ server/.spotify_token_cache
+you run server/auth.py on the server machine
+  1. spotipy starts a tiny listener on 127.0.0.1:8888 (local only)
+  2. it opens the Spotify authorize page in your browser
+     (with client_id + scopes + redirect_uri attached)
+  3. you click "Agree" in the browser
+  4. Spotify redirects the browser to http://127.0.0.1:8888/callback?code=XXXX
+     → the browser loops back into the same machine → spotipy receives the code
+  5. spotipy exchanges code + client_secret for access_token + refresh_token
+  6. both are written to server/.spotify_token_cache
 ```
 
-จุดสำคัญ: **Spotify ไม่เคยต้องเชื่อมเข้ามาหาเครื่องเราเลย** — คนที่วิ่งไปที่ 127.0.0.1 คือ browser ของเราเอง กฎ loopback จึงใช้ได้กับเครื่องหลังบ้าน/NAT ทุกกรณี แต่ก็แปลว่า **browser กับ auth.py ต้องอยู่เครื่องเดียวกัน** (ห้าม ssh ไปรันแล้วเปิด browser คนละเครื่อง)
+Key point: **Spotify never connects to your machine** — it's your own
+browser that hits 127.0.0.1, so the loopback rule works behind any NAT. But
+it also means **the browser and auth.py must be on the same machine** (don't
+run it over ssh and open the browser elsewhere).
 
-### 5.2 Scopes ที่ขอ
+### 5.2 Requested scopes
 
-| scope | ใช้ทำอะไร |
+| scope | used for |
 |---|---|
-| `user-read-currently-playing` | อ่านเพลงที่กำลังเล่น |
-| `user-read-playback-state` | อ่านสถานะ play/pause, progress, device |
-| `user-modify-playback-state` | สั่ง play/pause/next/previous (ปุ่มทัช) |
+| `user-read-currently-playing` | reading the current track |
+| `user-read-playback-state` | play/pause state, progress, volume, shuffle, repeat, device |
+| `user-modify-playback-state` | play/pause/next/previous/seek/volume/shuffle/repeat |
 
-ถ้าแก้ scopes ในภายหลัง ต้องลบ `.spotify_token_cache` แล้วรัน `auth.py` ใหม่
+If you change the scopes later, delete `.spotify_token_cache` and run
+`auth.py` again.
 
-### 5.3 วงจรชีวิต token
+### 5.3 Token lifecycle
 
-- **access_token** อายุ 1 ชั่วโมง — `app.py` (ผ่าน spotipy) ต่ออายุให้อัตโนมัติโดยใช้ refresh_token ก่อนหมดทุกครั้ง ไม่ต้องทำอะไร
-- **refresh_token** ไม่มีวันหมดอายุ ตราบใดที่ไม่ถูก revoke (ถอนสิทธิ์ที่ https://www.spotify.com/account/apps/ หรือเปลี่ยน client_secret)
-- token ทั้งหมดอยู่ในไฟล์ `server/.spotify_token_cache` (ไฟล์เดียว, permission 600) — **ไฟล์นี้คือกุญแจเข้าบัญชี Spotify ห้าม commit / แชร์**
-- Docker container ไม่ได้เก็บ token เอง — มัน bind-mount ไฟล์นี้จาก host (ดู 6.3) ดังนั้น auth ใหม่บน host เมื่อไหร่ container ก็เห็นทันที
+- The **access_token** lives 1 hour — `app.py` (via spotipy) refreshes it
+  automatically using the refresh_token; nothing to do.
+- The **refresh_token** never expires unless revoked (at
+  https://www.spotify.com/account/apps/ or by rotating the client_secret).
+- All tokens live in `server/.spotify_token_cache` (single file,
+  permission 600) — **this file is the key to your Spotify account; never
+  commit or share it.**
+- The Docker container doesn't store tokens itself — it bind-mounts this file
+  from the host (§6.3), so re-authing on the host is picked up instantly.
 
-### 5.4 ต้อง auth ใหม่เมื่อไหร่
+### 5.4 When you need to re-auth
 
-- เปลี่ยน scopes / client_id / client_secret
-- กด revoke ใน Spotify account
-- ไฟล์ cache หาย
+- scopes / client_id / client_secret changed
+- access revoked in your Spotify account
+- the cache file was lost
 
-อาการ: `docker logs spotify-cyd` ขึ้น `no cached token - run auth.py first` และบอร์ดขึ้นจอ "เชื่อมต่อ server ไม่ได้"... (จริง ๆ server ตอบอยู่แต่ `ok:false` → จอ idle) วิธีแก้: `server/.venv/bin/python server/auth.py` บน Mac mini แล้วจบ ไม่ต้อง restart container
+Symptom: `docker logs spotify-cyd` shows `no cached token - run auth.py
+first` and the board sits on the idle screen. Fix:
+`server/.venv/bin/python server/auth.py` on the server machine — no
+container restart needed.
 
 ---
 
-## 6. ติดตั้งตั้งแต่ศูนย์ (step-by-step)
+## 6. Install from scratch (step-by-step)
 
-### 6.1 เตรียมฝั่ง server (Mac mini)
+### 6.1 Server side
 
 ```bash
-cd /Users/kritsadas/Documents/workspace/spotify-cyd/server
+cd spotify-cyd/server
 
-# 1. สร้าง virtualenv (ใช้ตอน auth และตอน dev — ตัว production รันใน Docker)
+# 1. create a virtualenv (used for auth and dev — production runs in Docker)
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. สร้าง config template (รันครั้งแรกจะ exit พร้อมสร้างไฟล์)
+# 2. create the config template (first run exits after creating the file)
 .venv/bin/python app.py
 
-# 3. แก้ config.json — ใส่ client_id / client_secret จาก Dashboard (ข้อ 4)
+# 3. edit config.json — fill in client_id / client_secret from the Dashboard (§4)
+#    (see config.json.example)
 
-# 4. login ครั้งเดียว (เปิด browser)
+# 4. one-time login (opens a browser)
 .venv/bin/python auth.py
-# เห็น "Logged in as: <ชื่อ>" = สำเร็จ
+# "Logged in as: <name>" = success
 ```
 
-### 6.2 ทดสอบ server ก่อนขึ้น Docker
+### 6.2 Test the server before Docker
 
 ```bash
 .venv/bin/python app.py &
 curl http://127.0.0.1:8080/health          # {"ok": true}
-# เปิดเพลงใน Spotify แล้ว:
-curl http://127.0.0.1:8080/now             # ต้องเห็นชื่อเพลง
-curl -X POST http://127.0.0.1:8080/next    # เพลงต้องข้าม (ต้องมี Premium)
+# play something in Spotify, then:
+curl http://127.0.0.1:8080/now             # should show the track
+curl -X POST http://127.0.0.1:8080/next    # should skip (needs Premium)
 kill %1
 ```
 
-### 6.3 รันถาวรด้วย Docker
+### 6.3 Run permanently with Docker
 
 ```bash
-cd /Users/kritsadas/Documents/workspace/spotify-cyd
+cd spotify-cyd
 docker compose up -d --build
 ```
 
-สิ่งที่ `docker-compose.yml` ทำ:
-- build image จาก `server/Dockerfile` (python:3.12-slim + pip deps)
-- map พอร์ต `8080:8080`
-- **bind-mount 2 ไฟล์จาก host เข้า container:** `config.json` (อ่าน credentials) และ `.spotify_token_cache` (อ่าน+เขียน — spotipy ต่ออายุ token แล้วเขียนกลับลงไฟล์นี้)
-- `restart: unless-stopped` → container ฟื้นเองเมื่อ crash หรือหลังรีบูต Mac (Docker Desktop ต้องตั้ง Start at login — เครื่องนี้ตั้งไว้แล้ว)
+What `docker-compose.yml` does:
+- builds the image from `server/Dockerfile` (python:3.12-slim + pip deps)
+- maps port `8080:8080`
+- **bind-mounts two files from the host:** `config.json` (credentials,
+  read) and `.spotify_token_cache` (read+write — spotipy refreshes tokens
+  and writes them back)
+- `restart: unless-stopped` → the container recovers from crashes and
+  reboots (enable Docker Desktop's start-at-login)
 
-คำสั่งดูแล:
+Maintenance commands:
 ```bash
-docker logs -f spotify-cyd        # ดู log สด
+docker logs -f spotify-cyd        # live logs
 docker compose restart            # restart
-docker compose up -d --build      # deploy โค้ดใหม่หลังแก้ app.py
+docker compose up -d --build      # deploy new code after editing app.py
 ```
 
-(ทางเลือกไม่ใช้ Docker: launchd plist อยู่ที่ `server/com.kritsadas.spotify-cyd.plist` — copy ไป `~/Library/LaunchAgents` แล้ว `launchctl load`)
+(Non-Docker alternative: a launchd plist is provided at
+`server/com.kritsadas.spotify-cyd.plist` — copy it to
+`~/Library/LaunchAgents` and `launchctl load` it.)
 
-### 6.4 Flash บอร์ด
+### 6.4 Flash the board
 
-ต้องมี PlatformIO CLI (`pio`) — ติดตั้งแล้วบนเครื่องนี้
+Requires the PlatformIO CLI (`pio`).
 
 ```bash
 cd firmware
 
-# ครั้งแรก: ผ่านสาย USB (บอร์ดโผล่เป็น /dev/cu.usbserial-230)
+# first time: over USB
 pio run -t upload
 
-# ครั้งถัดไป: ผ่าน WiFi (OTA) — ไม่ต้องเสียบสาย
-pio run -e cyd_ota -t upload --upload-port <ip บอร์ด>
+# afterwards: over WiFi (OTA) — no cable needed
+pio run -e cyd_ota -t upload --upload-port <board-ip>
 ```
 
-Environments ใน `platformio.ini`:
-| env | ใช้เมื่อไหร่ |
+Environments in `platformio.ini`:
+| env | when |
 |---|---|
-| `cyd` (default) | บอร์ด CYD ปกติ USB 1 ช่อง (จอ ILI9341) — บอร์ดที่ใช้อยู่ |
-| `cyd_ota` | เหมือน `cyd` แต่ upload ผ่าน WiFi |
-| `cyd2usb` / `cyd2usb_ota` | เผื่อบอร์ดรุ่น USB 2 ช่อง (จอ ST7789 ต้อง BGR + inversion) |
+| `cyd` (default) | the common 1-USB-port CYD (ILI9341 panel) |
+| `cyd_ota` | same as `cyd`, uploads over WiFi |
+| `cyd2usb` / `cyd2usb_ota` | the 2-USB-port variant (ST7789 panel, needs BGR + inversion) |
 
-### 6.5 บูตครั้งแรก
+### 6.5 First boot
 
-1. จอขึ้น "Spotify CYD ... กำลังต่อ WiFi"
-2. ถ้าไม่เคยตั้ง WiFi → ทำตามข้อ 3.4
-3. ต่อได้แล้ว → ถ้ามีเพลงเล่นจะขึ้นหน้า Now Playing ภายใน ~2-4 วิ / ไม่มีเพลง → หน้านาฬิกา
+1. The screen shows "Spotify CYD v_._._ ... connecting to WiFi" (the
+   firmware version is shown here).
+2. If WiFi was never configured → follow §3.4.
+3. Once connected → if something is playing, the Now Playing screen appears
+   within ~2–4 s; otherwise the clock screen.
 
 ---
 
-## 7. การใช้งานประจำวัน
+## 7. Daily use
 
-- **แตะจอโซนซ้าย** = เพลงก่อนหน้า | **กลาง** = เล่น/หยุด | **ขวา** = เพลงถัดไป
-- พื้นหลัง + ปุ่ม + กรอบปก เปลี่ยนสีตามโทนปกอัลบั้มอัตโนมัติ
-- จอหรี่เอง 23:00–07:00 (ตั้งใน `main.cpp`: `NIGHT_START_H`, `NIGHT_END_H`, `NIGHT_DUTY`)
-- **แตะจอตอนจอหรี่** → สว่างเต็ม 5 นาที (`TOUCH_WAKE_MS`) แล้วหรี่กลับเอง — การแตะครั้งแรกตอนหรี่จะแค่ปลุกจอ ไม่นับเป็นคำสั่งเพลง (กันแตะพลาดตอนมืด) แตะครั้งถัดไปเป็นคำสั่งปกติและต่ออายุความสว่างทุกครั้ง
-- ไม่มีเพลงเล่น → นาฬิกา | server ล่ม/ปิด Mac → ขึ้นข้อความพร้อม IP ที่พยายามต่อ
+- **5-zone control row**: shuffle | previous | play/pause | next | repeat —
+  shuffle/repeat icons light up in the theme color when active (track-repeat
+  shows a "1")
+- **Tap the progress bar** = seek to that position
+- **Swipe up/down** = volume ±10% (a volume bar replaces the progress bar
+  for ~1.6 s)
+- Background + buttons + art frame tint themselves to the album color
+- **Auto-dimming follows the room's light** (onboard LDR; tune in
+  `main.cpp`: `LDR_BRIGHT_RAW`, `LDR_DARK_RAW`, `MIN_DUTY`)
+- **Touching a dimmed screen** → full brightness for 5 minutes
+  (`TOUCH_WAKE_MS`), then it dims again — the first touch while dimmed only
+  wakes the screen and never fires a playback command (no accidental skips
+  in the dark)
+- Nothing playing → clock (tap thirds: previous / play-pause / next) |
+  server down → an error screen with the IP it tried
 
-### HTTP endpoints ทั้งหมด
+### All HTTP endpoints
 
-**Server (Mac mini :8080)**
-| endpoint | method | ทำอะไร |
+**Server (:8080)**
+| endpoint | method | what it does |
 |---|---|---|
-| `/now` | GET | JSON เพลงปัจจุบัน (โครงตาม 2.1) |
-| `/art/<art_id>?size=N` | GET | ปกเป็น raw RGB565 big-endian, N×N (32–240, default 170) |
-| `/playpause` `/play` `/pause` `/next` `/previous` | POST | สั่งเพลง แล้วตอบสถานะใหม่ |
-| `/health` | GET | เช็คว่า server มีชีวิต |
+| `/now` | GET | current-track JSON (shape in §2.1) |
+| `/art/<art_id>?size=N` | GET | art as raw RGB565 big-endian, N×N (32–240, default 170) |
+| `/playpause` `/play` `/pause` `/next` `/previous` | POST | playback commands; reply with fresh state |
+| `/seek?ms=N` | POST | jump to position N ms |
+| `/volume?delta=N` or `/volume?set=N` | POST | relative/absolute volume (clamped 0–100) |
+| `/shuffle` | POST | toggle shuffle |
+| `/repeat` | POST | cycle repeat off → context → track |
+| `/health` | GET | liveness check |
 
-**บอร์ด (:80)**
-| endpoint | ทำอะไร |
+**Board (:80)**
+| endpoint | what it does |
 |---|---|
-| `/screen` | screenshot จอเป็น RGB565 dump — ใช้คู่ `tools/capture.py <ip> [ไฟล์.png]` |
-| `/server?h=IP` | เปลี่ยน server IP (เก็บ NVS) แล้วรีบูต / เรียกไม่ใส่ `h` = ดูค่าปัจจุบัน |
-| `/flip` | พลิกภาพ 180° (rotation 1↔3, เก็บ NVS) — สลับทิศมุมมองที่ดีของจอ TN |
-| `/test` | หน้าทดสอบจอ 2 นาที: แถบ RGBW + gradient A (drawPixel) vs B (pushImage) — A กับ B ต้องเหมือนกันเสมอ ถ้าต่าง = byte order พัง |
-| `/artbuf` | dump บัฟเฟอร์ปกดิบในแรมบอร์ด (debug เทียบกับของ server) |
+| `/screen` | screenshot as an RGB565 dump — use with `tools/capture.py <ip> [out.png]` |
+| `/server?h=IP` | change the server IP (saved to NVS) and reboot / without `h` = show current |
+| `/flip` | rotate 180° (rotation 1↔3, saved to NVS) — flips the TN panel's good viewing side |
+| `/test` | 2-minute test screen: RGBW bars + gradient A (drawPixel) vs B (pushImage) — A must equal B, else byte order is broken |
+| `/ldr` | smoothed light-sensor reading + current backlight duty — for calibrating dimming |
+| `/touch` | last touch gesture (start/end coords + dy) — for calibrating touch |
+| `/artbuf` | dump the raw art buffer in board RAM (debug, compare against the server's bytes) |
 
 ---
 
-## 8. Troubleshooting (จากเหตุการณ์จริง)
+## 8. Troubleshooting (from real incidents)
 
-| อาการ | สาเหตุ | วิธีแก้ |
+| Symptom | Cause | Fix |
 |---|---|---|
-| ปกเป็นลายรุ้ง/เม็ดสีเพี้ยน แต่ตัวหนังสือปกติ | byte order สลับซ้ำ (`setSwapBytes(true)` กับข้อมูล big-endian) | ต้องเป็น `setSwapBytes(false)` ใน `drawArt()` — แก้ถาวรแล้ว, เช็คได้ด้วย `/test` (A ต้อง = B) |
-| ทั้งจอโทนฟ้า/ซีดเมื่อมองเฉียง | จอ TN มุมมองแคบ (ข้อจำกัดฮาร์ดแวร์) | ตั้งจอเอียงเข้าหาสายตา หรือ `/flip` เพื่อสลับทิศมุมมองที่ดี |
-| ถ่ายรูปจอแล้วปกเป็นจุดรุ้ง (แต่ตาเปล่าปกติ) | moiré ของกล้อง + subpixel จอ | ไม่ใช่ปัญหาจริง |
-| ปกไล่สีเป็นขั้น ๆ | จอแสดงได้ 65,536 สี | server ทำ dithering ให้แล้ว (`rgb565_dithered`) |
-| จอขึ้น "เชื่อมต่อ server ไม่ได้" | Mac ปิด / container ตาย / Mac เปลี่ยน IP | `docker ps` เช็ค, ตั้ง DHCP reservation, หรือ `/server?h=IP ใหม่` |
-| `no cached token - run auth.py first` ใน log | token cache หาย/ถูก revoke | รัน `auth.py` ใหม่บน host (ดู 5.4) |
-| กดปุ่มแล้วเพลงไม่เปลี่ยน | ไม่มี active device หรือไม่ใช่ Premium | เปิดแอป Spotify ให้เล่นเพลงอยู่ก่อน |
-| OTA ไม่เจอบอร์ด | mDNS ไม่นิ่ง / IP เปลี่ยน | หา IP ตามข้อ 3.3 แล้ว `--upload-port <ip>` |
-| ปกโหลดไม่ขึ้น (ค้าง placeholder แผ่นเสียง) | server ดึงรูปจาก CDN ไม่ได้ / buffer ไม่ครบ | ดู serial log บอร์ด (`[art] ...got X/33800`) และ `docker logs` |
-| ชื่อเพลงญี่ปุ่น/เกาหลี/จีนเป็นช่องว่าง | ฟอนต์ที่ฝัง subset แค่ Latin+ไทย | พฤติกรรมปกติ — จะรองรับต้อง subset ฟอนต์เพิ่ม (คันจิกินพื้นที่มาก ดูข้อ 9) |
+| Art is rainbow noise but text is fine | double byte swap (`setSwapBytes(true)` on big-endian data) | must be `setSwapBytes(false)` in `drawArt()` — fixed permanently; verify with `/test` (A must equal B) |
+| Whole screen washed out / bluish at an angle | TN panel's narrow viewing cone (hardware limit) | angle the display toward you, or `/flip` to swap the good viewing side |
+| Photos of the screen show rainbow speckles (fine to the eye) | camera moiré + panel subpixels | not a real problem |
+| Art shows color banding | 65,536-color panel | the server already dithers (`rgb565_dithered`) |
+| Board shows "can't reach server" | server machine off / container dead / server IP changed | check `docker ps`, set a DHCP reservation, or `/server?h=<new-ip>` |
+| `no cached token - run auth.py first` in logs | token cache lost/revoked | re-run `auth.py` on the host (§5.4) |
+| Buttons don't change the music | no active device, or not Premium | start playback in a Spotify app first |
+| Volume swipe does nothing | target device rejects volume commands (e.g. iPhone) | play on a device that accepts them (desktop/speaker) |
+| Screen never dims / always dim | LDR thresholds don't match the room | read the real value at `/ldr`, adjust `LDR_BRIGHT_RAW` / `LDR_DARK_RAW` |
+| OTA can't find the board | flaky mDNS / IP changed / another ESP32 took the IP | find the IP per §3.3, **verify it's the right board first**, then `--upload-port <ip>` |
+| Art never loads (record placeholder stays) | server can't reach the CDN / incomplete buffer | check the board serial log (`[art] ...got X/33800`) and `docker logs` |
+| Japanese/Korean/Chinese titles are blank | embedded font is a Latin+Thai subset | current behavior — the roadmap fixes this with server-side text rendering |
 
 ---
 
-## 9. โครงสร้างโค้ดและจุดปรับแต่ง
+## 9. Code layout and tuning points
 
 ```
 spotify-cyd/
 ├── server/
-│   ├── app.py                # Flask ทั้งหมด: /now /art /คำสั่ง + dithering + theme color
-│   ├── auth.py               # OAuth ครั้งแรก (รันบน host เท่านั้น)
-│   ├── spotify_common.py     # config + SpotifyOAuth ที่ใช้ร่วมกัน
-│   ├── config.json           # client_id/secret (gitignored)
-│   ├── .spotify_token_cache  # token (gitignored, ห้ามแชร์)
+│   ├── app.py                # all of Flask: /now /art /commands + dithering + theme color
+│   ├── auth.py               # first-time OAuth (host only)
+│   ├── spotify_common.py     # shared config + SpotifyOAuth
+│   ├── config.json           # client_id/secret (gitignored — see config.json.example)
+│   ├── .spotify_token_cache  # tokens (gitignored, never share)
 │   ├── Dockerfile
-│   └── com.kritsadas.spotify-cyd.plist   # ทางเลือก launchd
+│   └── com.kritsadas.spotify-cyd.plist   # launchd alternative
 ├── docker-compose.yml
 ├── firmware/
-│   ├── platformio.ini        # pins, SPI 40MHz, partition min_spiffs, envs
+│   ├── platformio.ini        # pins, SPI 40MHz, min_spiffs partition, envs
 │   └── src/
-│       ├── main.cpp          # ทั้งแอป: WiFi, netTask, UI, touch, endpoints
-│       └── kanit_font.h      # ฟอนต์ Kanit Medium subset ไทย+ละติน 26KB (PROGMEM)
-├── tools/capture.py          # ดึง screenshot จริงจากบอร์ด
-└── docs/SETUP.md             # ไฟล์นี้
+│       ├── main.cpp          # the whole app: WiFi, netTask, UI, touch, endpoints
+│       └── kanit_font.h      # Kanit Medium subset, Thai+Latin, 26 KB (PROGMEM)
+├── tools/capture.py          # pull a real screenshot from the board
+├── CHANGELOG.md
+└── docs/                     # SETUP.md (this file) / SETUP.th.md (Thai)
 ```
 
-จุดปรับแต่งยอดนิยม (ทั้งหมดใน `firmware/src/main.cpp` เว้นแต่ระบุ):
+Popular tuning points (all in `firmware/src/main.cpp` unless noted):
 
-| อยากปรับ | ที่ไหน |
+| To change | Where |
 |---|---|
-| ความเข้มพื้นหลังธีม | `themeBg()` — ตัวเลข `76` (0–255, มาก = สว่าง) |
-| ขนาดปก | `ART_SIZE` (ต้อง ≤ 240 และแก้ layout ตาม) |
-| ความถี่ poll | `POLL_INTERVAL_MS` (default 2000) |
-| ช่วงเวลา/ระดับหรี่จอ | `NIGHT_START_H` `NIGHT_END_H` `NIGHT_DUTY` |
-| ระยะเวลาปลุกจอเมื่อแตะตอนกลางคืน | `TOUCH_WAKE_MS` (default 300000 = 5 นาที) |
-| สีเด่นจากปก (อัลกอริทึม) | `server/app.py` → `dominant_color()` |
-| ฟอนต์ | สร้าง subset ใหม่ด้วย `pyftsubset` แล้วแปลงเป็น header แทน `kanit_font.h` |
+| theme background intensity | `themeBg()` — the constant `76` (0–255, higher = brighter) |
+| art size | `ART_SIZE` (≤ 240; adjust the layout too) |
+| poll rate | `POLL_INTERVAL_MS` (default 2000) |
+| dimming light range / minimum | `LDR_BRIGHT_RAW` `LDR_DARK_RAW` `MIN_DUTY` (read real values from `/ldr`) |
+| wake duration on touch while dimmed | `TOUCH_WAKE_MS` (default 300000 = 5 min) |
+| volume step per swipe | the `±10` constant in `handleTouch()` |
+| dominant-color algorithm | `server/app.py` → `dominant_color()` |
+| font | build a new subset with `pyftsubset`, convert to a header replacing `kanit_font.h` |
 
-### ข้อควรรู้เชิงดีไซน์ (อย่าเผลอแก้กลับ)
+### Design decisions (don't accidentally revert)
 
-1. `setSwapBytes(false)` สำหรับปกจาก server (big-endian) — ดูข้อ 2.2
-2. SPI จอ 40MHz — ILI9341 สเปคจริงรับแค่นี้ (55MHz เดิมเสี่ยง)
-3. วาดจอจาก core 1 (`loop`) เท่านั้น — netTask ห้ามแตะ TFT/OFR
-4. ฟอนต์ไทยเรนเดอร์ด้วย OpenFontRender (FreeType) — สระ/วรรณยุกต์ใช้ zero-advance ของฟอนต์ ไม่มี GPOS จึงอาจเพี้ยนเล็กน้อยกับพยัญชนะหางสูง (ป ฝ ฟ) — ยอมรับได้
-5. `/screen` วาดลง sprite 8-bit → สีใน screenshot หยาบกว่าจอจริง ใช้ดู layout ไม่ใช่ดูสี
+1. `setSwapBytes(false)` for server art (big-endian) — see §2.2
+2. Display SPI at 40 MHz — the ILI9341's real spec limit (55 MHz was flaky)
+3. Draw only from core 1 (`loop`) — netTask must never touch TFT/OFR
+4. Thai rendered by OpenFontRender (FreeType) — vowels/tone marks rely on the
+   font's zero-advance metrics, no GPOS, so tall-ascender consonants
+   (ป ฝ ฟ) can look slightly off — accepted
+5. `/screen` renders into an 8-bit sprite → screenshot colors are coarser
+   than the real panel; use it for layout, not color checks
+6. The progress knob overhangs the bar ends by ±5 px — any redraw must clear
+   all four sides around the bar (the white-speck bug in v1.1.0)
