@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kritsadas.spotify-cyd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kritsadas/Documents/workspace/spotify-cyd/server/.venv/bin/python3</string>
+        <string>/Users/kritsadas/Documents/workspace/spotify-cyd/server/app.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/kritsadas/Documents/workspace/spotify-cyd/server</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/kritsadas/Library/Logs/spotify-cyd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kritsadas/Library/Logs/spotify-cyd.log</string>
+</dict>
+</plist>

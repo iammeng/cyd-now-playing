@@ -1,0 +1,11 @@
+services:
+  spotify-cyd:
+    build: ./server
+    container_name: spotify-cyd
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # ทำ OAuth บนเครื่อง host ก่อน (server/auth.py) แล้ว container ใช้ token cache ร่วมกัน
+      - ./server/config.json:/app/config.json
+      - ./server/.spotify_token_cache:/app/.spotify_token_cache

@@ -1,0 +1,6 @@
+server/config.json
+server/.spotify_token_cache
+server/.venv/
+firmware/.pio/
+__pycache__/
+.DS_Store
