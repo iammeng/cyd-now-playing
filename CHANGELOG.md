@@ -100,7 +100,7 @@ that uses them.
 Versions 1.0.0 and 1.1.0 predate the public repository (its history starts
 at 1.1.1), so only 1.1.1 and later have tags.
 
-[1.2.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md
+[1.2.0]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.2.0
 [1.1.1]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.1.1
 [1.1.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md
 [1.0.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md
