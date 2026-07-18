@@ -7,6 +7,12 @@ A Spotify Now Playing display for the "Cheap Yellow Display" board
 full touch playback controls, and a UI that tints itself to the album art's
 dominant color.
 
+<p align="center">
+  <img src="docs/screen.jpg" width="520" alt="The CYD board on a desk showing the Now Playing screen: album art, track info, shuffle/prev/play/next/repeat controls, and a seekable progress bar">
+  <br>
+  <sub>The real thing — the "cheap yellow" board itself, no case needed</sub>
+</p>
+
 ## Features
 
 - 🎨 **Album art** with Floyd–Steinberg dithering; the whole UI (background,
