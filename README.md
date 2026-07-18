@@ -18,6 +18,12 @@ dominant color.
 - 🎨 **Album art** with Floyd–Steinberg dithering; the whole UI (background,
   buttons, frames) tints itself to the art's dominant color
 - 🇹🇭 **Thai text rendering** (OpenFontRender + embedded Kanit subset)
+- 🌏 **Japanese/Korean/Chinese titles** via server-side text rendering
+  (Noto Sans CJK), with automatic fallback to the embedded font
+- 📜 **Marquee scrolling** for titles too long to fit, plus a **tap-to-detail**
+  screen showing the full title/artists/album
+- 🔀 **Spotify Connect device switching**: long-press to pick where the music
+  plays (phone, computer, speakers)
 - 🎛️ **Full playback control**: play/pause · previous/next · shuffle ·
   repeat (off/context/track) — five touch zones with state-aware icons
 - ⏩ **Tap-to-seek** on the progress bar (locally interpolated, updates
@@ -42,6 +48,22 @@ Spotify API ── Mac/PC on the LAN (server/) ── plain HTTP ── CYD boar
 A small companion server handles Spotify OAuth and converts album art to raw
 RGB565 for the board, so the ESP32 never has to deal with TLS or JPEG
 decoding.
+
+## What you need
+
+- **ESP32-2432S028R "Cheap Yellow Display"** board (2.8" ILI9341 + resistive
+  touch, ~$5–8) and a USB cable/charger to power it. The 2-USB-port variant
+  (ST7789 panel) works too — build with the `cyd2usb` env instead.
+- **An always-on computer on the same WiFi/LAN** to run the companion server
+  (Mac mini, PC, Raspberry Pi, NAS…) — Python 3.10+ or Docker.
+- **A Spotify account** — the display works with any account, but the touch
+  controls (play/pause, seek, volume, device switching…) require **Premium**
+  plus an active device (a Spotify app playing/paused somewhere).
+- **A Spotify Developer app** (free) for the Client ID/Secret — created in
+  step 1 below.
+- **2.4 GHz WiFi** — the ESP32 cannot see 5 GHz networks.
+- **PlatformIO** (`pip install platformio`) for the first flash over USB;
+  later updates go over WiFi (OTA).
 
 ## First-time setup
 
@@ -93,6 +115,9 @@ connect to it, open `192.168.4.1`, pick your WiFi, and set the **Server IP**
 - **Control row** (bottom): shuffle · previous · play/pause · next · repeat —
   shuffle/repeat icons light up in the album accent color when active
 - **Tap the progress bar** to jump to that position in the track
+- **Tap the album art / track info** to see the full title, artists, and album
+- **Long-press** anywhere to pick which device plays (Spotify Connect) —
+  works from the clock screen too
 - **Swipe up/down** anywhere to change volume ±10% (a volume bar appears
   briefly in place of the progress bar)
 - **Auto-brightness**: the backlight follows the room's light via the CYD's
@@ -114,6 +139,10 @@ the playback device).
 | server | `POST /seek?ms=N` | Jump to position |
 | server | `POST /volume?delta=N` (or `?set=N`) | Adjust volume 0–100 |
 | server | `POST /shuffle` / `POST /repeat` | Toggle shuffle / cycle repeat mode |
+| server | `GET /text?t=&px=` | Text as packed 4-bit grayscale (CJK-capable); `&wrap=W&lines=N` for multi-line |
+| server | `GET /devices` | Spotify Connect device list |
+| server | `POST /transfer?id=` | Move playback to another device |
+| board | `GET /version` | Firmware version (board identity check) |
 | board | `GET /screen` | Live screenshot (use `tools/capture.py`) |
 | board | `GET /server?h=IP` | Change server IP and reboot |
 | board | `GET /test` | 2-minute display test pattern |
@@ -131,6 +160,7 @@ Note: for the 2-USB-port CYD variant (ST7789 panel) build with
 - `firmware/` — PlatformIO, TFT_eSPI + OpenFontRender (Kanit font embedded in `src/kanit_font.h`)
 - `tools/capture.py` — pull a real screenshot from the board: `python3 tools/capture.py <board-ip>`
 
-Font: [Kanit](https://github.com/cadsondemak/kanit) (OFL), subset to
-**Latin + Thai** (~26 KB). Titles in Japanese/Korean/Chinese currently render
-as blanks — CJK support via server-side text rendering is on the roadmap.
+Fonts: on-board [Kanit](https://github.com/cadsondemak/kanit) (OFL), subset to
+**Latin + Thai** (~26 KB), used for the clock/offline screens and as fallback.
+Track text is rendered server-side with **Noto Sans** (Thai → Latin → CJK
+fallback chain), so Japanese/Korean/Chinese titles display correctly.

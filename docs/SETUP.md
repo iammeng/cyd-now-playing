@@ -386,12 +386,16 @@ Environments in `platformio.ini`:
 | `/volume?delta=N` or `/volume?set=N` | POST | relative/absolute volume (clamped 0–100) |
 | `/shuffle` | POST | toggle shuffle |
 | `/repeat` | POST | cycle repeat off → context → track |
+| `/text?t=&px=N` | GET | text as packed 4-bit grayscale strip (Noto Thai→Latin→CJK); `&maxw=` caps single-line width, `&wrap=W&lines=N` = multi-line; 4-byte w/h header then rows at stride (w+1)/2 |
+| `/devices` | GET | Spotify Connect device list (id, name, type, active) |
+| `/transfer?id=` | POST | move playback to a device (force-play) |
 | `/health` | GET | liveness check |
 
 **Board (:80)**
 | endpoint | what it does |
 |---|---|
-| `/screen` | screenshot as an RGB565 dump — use with `tools/capture.py <ip> [out.png]` |
+| `/version` | firmware version — use to verify board identity before OTA |
+| `/screen` | screenshot as an RGB565 dump — use with `tools/capture.py <ip> [out.png]`; if RAM is too fragmented for the capture sprite the board temporarily drops its text strips (they refetch in ~2 s); captures can show minor artifacts while the marquee is animating |
 | `/server?h=IP` | change the server IP (saved to NVS) and reboot / without `h` = show current |
 | `/flip` | rotate 180° (rotation 1↔3, saved to NVS) — flips the TN panel's good viewing side |
 | `/test` | 2-minute test screen: RGBW bars + gradient A (drawPixel) vs B (pushImage) — A must equal B, else byte order is broken |

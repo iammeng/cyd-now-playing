@@ -3,7 +3,7 @@
 🇹🇭 [อ่านภาษาไทย](MANUAL.th.md) · for installation see the [Setup guide](SETUP.md)
 
 Everything about *using* the display day-to-day. Current as of firmware
-**v1.1.1**.
+**v1.2.0**.
 
 ---
 
@@ -11,9 +11,11 @@ Everything about *using* the display day-to-day. Current as of firmware
 
 | Screen | When | What you see |
 |---|---|---|
-| **Boot** | power-on | logo + firmware version (the only place the version is shown) + WiFi status |
+| **Boot** | power-on | logo + firmware version (also at `GET /version`) + WiFi status |
 | **Now Playing** | something is playing/paused | art, title, artist, album, controls, progress |
 | **Clock** | connected, nothing playing | current time + Spotify logo |
+| **Devices** | long-press the screen | Spotify Connect device list — tap to move playback |
+| **Track detail** | tap the art / track info | full title, artists, album across the whole screen |
 | **Offline** | can't reach the server | the server address it tried, and a hint |
 | **WiFi setup** | no known WiFi | instructions for the setup portal (§6) |
 
@@ -28,8 +30,8 @@ Everything about *using* the display day-to-day. Current as of firmware
 
 ```
 ┌──────────────────────────────────────────┐
-│ ┌────────┐   Title (up to 2 lines)       │
-│ │ album  │   Artist                      │   ← no touch action (reserved)
+│ ┌────────┐   Title (scrolls when long)   │
+│ │ album  │   Artist                      │   ← tap = full-screen detail
 │ │  art   │   Album                       │
 │ └────────┘                               │
 ├──────────────────────────────────────────┤
@@ -50,7 +52,14 @@ Everything about *using* the display day-to-day. Current as of firmware
 | Tap **the progress bar** | jump to that position in the track |
 | **Swipe up** (anywhere) | volume +10% |
 | **Swipe down** (anywhere) | volume −10% |
+| Tap **the art / track info** | full-screen track detail (tap again to close) |
+| **Long-press** ~0.7 s (anywhere) | device picker — tap a row to move playback there, tap outside to close (works from the clock screen too) |
 
+- Title/artist/album lines wider than the text column **scroll (marquee)**
+  automatically. Track text is rendered by the server, so
+  Japanese/Korean/Chinese titles display correctly; if the server is older
+  or unreachable the board falls back to its embedded font with "…"
+  truncation as before.
 - A white ring flashes around a control to confirm the tap.
 - During a volume change, a **white volume bar** replaces the progress bar
   for about 1.5 s, with the percentage on the right.
@@ -99,6 +108,7 @@ for you).
 | `http://<board>/test` | show a 2-minute display test pattern |
 | `http://<board>/ldr` | current light-sensor reading + backlight level |
 | `http://<board>/touch` | last touch gesture (for calibration) |
+| `http://<board>/version` | firmware version — board identity check before OTA |
 
 Taking a proper screenshot from your computer:
 

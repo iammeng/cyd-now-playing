@@ -8,6 +8,33 @@ version refers to the firmware (`FW_VERSION` in `firmware/src/main.cpp`, shown
 on the boot screen); server changes ship together with the firmware version
 that uses them.
 
+## [1.2.0] - 2026-07-19
+
+### Added
+
+- **CJK-capable text via server-side rendering** — the server rasterizes
+  track/artist/album text with Noto Sans (Thai + Latin + CJK fallback chain)
+  and streams packed 4-bit grayscale strips (`GET /text`); the board blends
+  them over the album-themed background. Japanese/Korean/Chinese titles now
+  display instead of rendering as blanks. Falls back to the embedded Kanit
+  font if the server is older or unreachable.
+- **Marquee scrolling** — title/artist/album lines wider than the text column
+  scroll horizontally (with a hold at the start of each loop) instead of
+  being ellipsis-truncated.
+- **Spotify Connect device switching** — long-press the now-playing or clock
+  screen to list available devices; tap one to move playback there (the
+  active device is highlighted). Uses `GET /devices` + `POST /transfer?id=`.
+- **Tap-to-detail** — tap the album art / track info area to show the full
+  title, artists, and album wrapped across the whole screen (also
+  server-rendered, so CJK works there too). Tap again to close.
+- Board endpoint `GET /version` — firmware version without waiting for the
+  boot screen (also handy for identifying the board before OTA).
+
+### Fixed
+
+- A failed OTA transfer could leave the board wedged (UI frozen on the OTA
+  screen, HTTP dead) until a power cycle; OTA errors now reboot cleanly.
+
 ## [1.1.1] - 2026-07-18
 
 ### Fixed
@@ -73,6 +100,7 @@ that uses them.
 Versions 1.0.0 and 1.1.0 predate the public repository (its history starts
 at 1.1.1), so only 1.1.1 and later have tags.
 
+[1.2.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md
 [1.1.1]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.1.1
 [1.1.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md
 [1.0.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md

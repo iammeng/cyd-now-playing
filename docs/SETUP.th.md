@@ -318,12 +318,16 @@ Environments ใน `platformio.ini`:
 | `/volume?delta=N` หรือ `/volume?set=N` | POST | ปรับเสียงสัมพัทธ์/สัมบูรณ์ (clamp 0–100) |
 | `/shuffle` | POST | toggle สลับสุ่ม |
 | `/repeat` | POST | วนโหมดซ้ำ off → context → track |
+| `/text?t=&px=N` | GET | render ข้อความเป็น strip 4-bit grayscale (Noto ไทย→Latin→CJK); `&maxw=` จำกัดความกว้างบรรทัดเดียว, `&wrap=W&lines=N` = หลายบรรทัด; header 4 byte (w,h) ตามด้วยข้อมูลทีละแถว stride (w+1)/2 |
+| `/devices` | GET | รายชื่ออุปกรณ์ Spotify Connect (id, name, type, active) |
+| `/transfer?id=` | POST | ย้ายเพลงไปเล่นที่อุปกรณ์นั้น (force-play) |
 | `/health` | GET | เช็คว่า server มีชีวิต |
 
 **บอร์ด (:80)**
 | endpoint | ทำอะไร |
 |---|---|
-| `/screen` | screenshot จอเป็น RGB565 dump — ใช้คู่ `tools/capture.py <ip> [ไฟล์.png]` |
+| `/version` | เลขเวอร์ชัน firmware — ไว้เช็คตัวตนบอร์ดก่อน OTA |
+| `/screen` | screenshot จอเป็น RGB565 dump — ใช้คู่ `tools/capture.py <ip> [ไฟล์.png]`; ถ้าแรมแตกกระจายจนจองภาพ capture ไม่ได้ บอร์ดจะปล่อย text strips ชั่วคราว (กลับมาเองใน ~2 วิ); ภาพ capture อาจมี artifact เล็กน้อยตอน marquee กำลังวิ่ง |
 | `/server?h=IP` | เปลี่ยน server IP (เก็บ NVS) แล้วรีบูต / เรียกไม่ใส่ `h` = ดูค่าปัจจุบัน |
 | `/flip` | พลิกภาพ 180° (rotation 1↔3, เก็บ NVS) — สลับทิศมุมมองที่ดีของจอ TN |
 | `/test` | หน้าทดสอบจอ 2 นาที: แถบ RGBW + gradient A (drawPixel) vs B (pushImage) — A กับ B ต้องเหมือนกันเสมอ ถ้าต่าง = byte order พัง |

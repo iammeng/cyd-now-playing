@@ -8,6 +8,10 @@ Endpoints (plain HTTP on the LAN):
   POST /volume?delta=N (or ?set=N) -> adjust volume 0-100
   POST /shuffle        -> toggle shuffle
   POST /repeat         -> cycle off -> context -> track
+  GET  /text?t=&px=    -> text rendered as packed 4-bit grayscale (CJK-capable);
+                          optional &wrap=W&lines=N for multi-line, &maxw= cap
+  GET  /devices        -> Spotify Connect device list
+  POST /transfer?id=   -> move playback to another device
   GET  /health
 """
 import colorsys
@@ -20,6 +24,7 @@ import spotipy
 from flask import Flask, Response, jsonify, request
 
 from spotify_common import load_config, make_auth_manager
+from text_render import init_fonts, render_line_fit, render_wrapped, pack4
 from PIL import Image
 
 POLL_MIN_INTERVAL = 1.5  # seconds between real Spotify API calls
@@ -28,6 +33,7 @@ ART_CACHE_MAX = 8
 
 app = Flask(__name__)
 cfg = load_config()
+init_fonts()
 auth_manager = make_auth_manager(cfg, open_browser=False)
 sp = spotipy.Spotify(auth_manager=auth_manager)
 
@@ -316,6 +322,49 @@ def repeat_cycle():
     with lock:
         cur = now_state["repeat"]
     return spotify_command(lambda: sp.repeat(["off", "context", "track"][(cur + 1) % 3]))
+
+
+@app.get("/text")
+def text_strip():
+    """Rasterized text for the board: 4-byte w/h header + packed 4-bit rows."""
+    t = request.args.get("t", "")
+    px = max(8, min(48, request.args.get("px", 20, type=int)))
+    maxw = max(32, min(1024, request.args.get("maxw", 512, type=int)))
+    wrap = request.args.get("wrap", type=int)
+    lines = max(1, min(6, request.args.get("lines", 4, type=int)))
+    try:
+        if wrap:
+            img = render_wrapped(t, px, max(64, min(320, wrap)), lines)
+        else:
+            img = render_line_fit(t, px, maxw)
+    except Exception as e:
+        print(f"[text] {e}")
+        return Response("render failed", status=500)
+    return Response(pack4(img), mimetype="application/octet-stream")
+
+
+@app.get("/devices")
+def devices():
+    if not have_token():
+        return jsonify({"ok": False, "error": "not authenticated"}), 401
+    try:
+        devs = sp.devices().get("devices", [])
+    except Exception as e:
+        print(f"[devices] {e}")
+        return jsonify({"ok": False}), 502
+    return jsonify({"devices": [
+        {"id": d.get("id") or "", "name": d.get("name", ""),
+         "type": d.get("type", ""), "active": bool(d.get("is_active")),
+         "volume": d.get("volume_percent")}
+        for d in devs]})
+
+
+@app.post("/transfer")
+def transfer():
+    dev = request.args.get("id", "")
+    if not dev:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    return spotify_command(lambda: sp.transfer_playback(dev, force_play=True))
 
 
 @app.get("/health")
