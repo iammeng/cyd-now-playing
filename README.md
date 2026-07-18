@@ -1,11 +1,33 @@
 # Spotify CYD — Now Playing Display
 
-🇹🇭 [อ่านภาษาไทย](README.th.md) · 📖 [Full setup guide](docs/SETUP.md) · 📝 [Changelog](CHANGELOG.md)
+🇹🇭 [อ่านภาษาไทย](README.th.md) · 📖 [Setup guide](docs/SETUP.md) · 📘 [User manual](docs/MANUAL.md) · 📝 [Changelog](CHANGELOG.md)
 
 A Spotify Now Playing display for the "Cheap Yellow Display" board
 (ESP32-2432S028R): album art, track/artist/album names (Thai supported),
 full touch playback controls, and a UI that tints itself to the album art's
 dominant color.
+
+## Features
+
+- 🎨 **Album art** with Floyd–Steinberg dithering; the whole UI (background,
+  buttons, frames) tints itself to the art's dominant color
+- 🇹🇭 **Thai text rendering** (OpenFontRender + embedded Kanit subset)
+- 🎛️ **Full playback control**: play/pause · previous/next · shuffle ·
+  repeat (off/context/track) — five touch zones with state-aware icons
+- ⏩ **Tap-to-seek** on the progress bar (locally interpolated, updates
+  every second without network traffic)
+- 🔊 **Swipe volume**: swipe up/down anywhere for ±10%, with an on-screen
+  volume bar
+- 🌙 **Ambient-light auto-brightness** via the CYD's onboard light sensor;
+  touch a dimmed screen to wake it (first touch never skips a track)
+- 🕐 **Clock screen** when nothing is playing; friendly offline screen with
+  the server address when the server is unreachable
+- 📶 **WiFiManager captive portal** for first-time WiFi + server setup,
+  **OTA updates** afterwards — no cable needed
+- 🔍 **Debug endpoints**: live screenshot over HTTP, display test pattern,
+  light-sensor and touch readouts, 180° flip
+- 🐳 **Dockerized companion server** (Flask + spotipy + Pillow) handling
+  OAuth, caching, art conversion, and Spotify rate-limit protection
 
 ```
 Spotify API ── Mac/PC on the LAN (server/) ── plain HTTP ── CYD board (firmware/)
