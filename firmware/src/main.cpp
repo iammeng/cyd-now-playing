@@ -3,6 +3,7 @@
 #include <WiFiManager.h>
 #include <WebServer.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -12,7 +13,7 @@
 #include "OpenFontRender.h"
 #include "kanit_font.h"
 
-#define FW_VERSION "1.2.0"
+#define FW_VERSION "1.4.0"
 
 #define TOUCH_CS 33
 #define TOUCH_IRQ 36
@@ -22,6 +23,7 @@
 
 #define TZ_OFFSET_SEC (7 * 3600)
 #define POLL_INTERVAL_MS 2000UL
+#define DIM_POLL_INTERVAL_MS 10000UL // gentler polling while the screen is dimmed
 #define SERVER_PORT 8080
 #define DEFAULT_SERVER "192.168.1.195"
 #define STALE_REBOOT_MS 3600000UL
@@ -557,19 +559,75 @@ void drawCurrent() {
 
 // ---------- network (core 0) ----------
 
+// one persistent connection for the small/frequent requests (poll + commands):
+// keep-alive skips a TCP handshake every 2s, which matters on weak signal
+WiFiClient reqClient;
+HTTPClient reqHttp;
+
+// find the server via mDNS (_spotify-cyd._tcp, advertised by the host);
+// blocks ~2s, so only called when polling already fails. The mDNS responder
+// itself is already running courtesy of ArduinoOTA.begin().
+bool mdnsFindServer() {
+  int n = MDNS.queryService("spotify-cyd", "tcp");
+  if (n <= 0) return false;
+  String ip = MDNS.IP(0).toString();
+  if (ip == "0.0.0.0") return false;
+  if (ip != serverHost) {
+    xSemaphoreTake(stateMux, portMAX_DELAY);
+    serverHost = ip;
+    xSemaphoreGive(stateMux);
+    prefs.putString("server", ip);
+    reqClient.stop(); // old keep-alive socket points at the old host
+    Serial.printf("[mdns] server -> %s\n", ip.c_str());
+  }
+  return true;
+}
+
+// active WiFi recovery: setAutoReconnect alone can wedge silently (seen
+// 2026-07-19 - red dot for an hour until the stale-data watchdog rebooted)
+void wifiWatchdog() {
+  static unsigned long downSince = 0, lastKick = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    downSince = 0;
+    return;
+  }
+  unsigned long now = millis();
+  if (!downSince) {
+    downSince = now;
+    return;
+  }
+  unsigned long down = now - downSince;
+  if (down > 600000UL) { // 10 min without WiFi beats waiting for the 1h reboot
+    Serial.println("[wifi] down 10 min - rebooting");
+    delay(100);
+    ESP.restart();
+  }
+  if (down < 15000UL || now - lastKick < 15000UL) return;
+  lastKick = now;
+  if (down > 180000UL) { // escalate to a full re-association
+    Serial.println("[wifi] hard reconnect");
+    WiFi.disconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    WiFi.begin(); // stored credentials
+  } else {
+    Serial.println("[wifi] reconnect");
+    WiFi.reconnect();
+  }
+}
+
 bool serverReq(bool post, const char *path, String &out) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(4000);
-  http.setConnectTimeout(3000);
+  reqHttp.setReuse(true); // end() keeps the socket open for the next request
+  reqHttp.setTimeout(4000);
+  reqHttp.setConnectTimeout(3000);
   char url[128];
   snprintf(url, sizeof url, "http://%s:%d%s", serverHost.c_str(), SERVER_PORT, path);
-  if (!http.begin(client, url)) return false;
-  int code = post ? http.POST("") : http.GET();
+  if (!reqHttp.begin(reqClient, url)) return false;
+  int code = post ? reqHttp.POST("") : reqHttp.GET();
   bool ok = code == 200;
-  if (ok) out = http.getString();
-  http.end();
+  if (ok) out = reqHttp.getString();
+  reqHttp.end();
+  if (code < 0) reqClient.stop(); // wedged keep-alive socket: reconnect next time
   if (!ok) Serial.printf("[http] %d %s\n", code, url);
   return ok;
 }
@@ -807,7 +865,9 @@ void netTask(void *arg) {
         lastPoll = millis();
       }
       unsigned long now = millis();
-      if (now - lastPoll >= POLL_INTERVAL_MS) {
+      // dimmed = user asleep: poll gently to save airtime on the busy 2.4G band
+      unsigned long pollMs = nightDimmed ? DIM_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+      if (now - lastPoll >= pollMs) {
         lastPoll = now;
         String body;
         if (serverReq(false, "/now", body)) {
@@ -818,6 +878,13 @@ void netTask(void *arg) {
           serverOk = false;
           stateDirty = true;
         }
+      }
+      // server unreachable: ask mDNS where it went (DHCP may have moved it,
+      // or the stored IP was never right on a fresh setup)
+      static unsigned long lastMdnsMs = 0;
+      if (pollFails >= 3 && millis() - lastMdnsMs >= 30000) {
+        lastMdnsMs = millis();
+        if (mdnsFindServer()) lastPoll = 0; // poll again right away
       }
       if (hasTrack && strlen(trArtId) && strcmp(trArtId, artLoadedId)) {
         char id[72];
@@ -845,6 +912,7 @@ void netTask(void *arg) {
         }
       }
     }
+    if (!otaActive) wifiWatchdog();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -1201,6 +1269,14 @@ void setup() {
     httpSrv.send(200, "text/plain", buf);
   });
   httpSrv.on("/touch", []() { httpSrv.send(200, "text/plain", touchLog); });
+  // signal quality for placement/OTA debugging: > -60 dBm good, < -75 weak
+  httpSrv.on("/wifi", []() {
+    char buf[96];
+    snprintf(buf, sizeof buf, "rssi=%d dBm ssid=%s ch=%d ip=%s",
+             (int)WiFi.RSSI(), WiFi.SSID().c_str(), (int)WiFi.channel(),
+             WiFi.localIP().toString().c_str());
+    httpSrv.send(200, "text/plain", buf);
+  });
   // board identity + firmware version without waiting for the boot screen
   httpSrv.on("/version", []() {
     httpSrv.send(200, "text/plain", "spotify-cyd v" FW_VERSION);

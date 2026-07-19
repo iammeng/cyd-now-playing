@@ -24,6 +24,10 @@ dominant color.
   screen showing the full title/artists/album
 - 🔀 **Spotify Connect device switching**: long-press to pick where the music
   plays (phone, computer, speakers)
+- 🎙️ **Podcast support**: episodes show their title, show name, publisher,
+  and episode art — not just music
+- 📡 **mDNS server discovery**: if the server's IP changes, the board finds
+  it again by itself (no reconfiguration)
 - 🎛️ **Full playback control**: play/pause · previous/next · shuffle ·
   repeat (off/context/track) — five touch zones with state-aware icons
 - ⏩ **Tap-to-seek** on the progress bar (locally interpolated, updates
@@ -37,9 +41,9 @@ dominant color.
 - 📶 **WiFiManager captive portal** for first-time WiFi + server setup,
   **OTA updates** afterwards — no cable needed
 - 🔍 **Debug endpoints**: live screenshot over HTTP, display test pattern,
-  light-sensor and touch readouts, 180° flip
-- 🐳 **Dockerized companion server** (Flask + spotipy + Pillow) handling
-  OAuth, caching, art conversion, and Spotify rate-limit protection
+  light-sensor / touch / WiFi-signal readouts, 180° flip
+- 🐳 **Dockerized companion server** (Flask + spotipy + Pillow + waitress)
+  handling OAuth, caching, art conversion, and Spotify rate-limit protection
 
 ```
 Spotify API ── Mac/PC on the LAN (server/) ── plain HTTP ── CYD board (firmware/)

@@ -2,3 +2,5 @@ flask>=3.0
 spotipy>=2.24
 pillow>=11.0
 fonttools>=4.50
+zeroconf>=0.130
+waitress>=3.0

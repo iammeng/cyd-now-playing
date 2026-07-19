@@ -8,6 +8,61 @@ version refers to the firmware (`FW_VERSION` in `firmware/src/main.cpp`, shown
 on the boot screen); server changes ship together with the firmware version
 that uses them.
 
+## [1.4.0] - 2026-07-19
+
+(Version 1.3.0 was an internal step flashed the same day and never released;
+its changes are included here.)
+
+### Added
+
+- **Podcast support** — the server now requests episode metadata
+  (`additional_types="episode"`), so podcasts show the episode title, show
+  name, publisher, and episode art instead of falling back to the clock
+  screen while an episode is playing.
+- **mDNS server discovery** — when the board can't reach its stored server
+  IP it looks up the `_spotify-cyd._tcp` service every 30 s and saves the
+  address it finds. Survives DHCP reassignment and makes first-time setup
+  work without typing an IP. The service is advertised by the server itself
+  via zeroconf (new dependency) when running directly on the host; under
+  Docker on macOS multicast can't leave the container, so a tiny launchd
+  agent (`server/com.kritsadas.spotify-cyd-mdns.plist`, runs the built-in
+  `dns-sd -R`) advertises from the host instead.
+- **Active WiFi recovery on the board** — if WiFi stays down the board now
+  nudges a reconnect after 15 s, escalates to a full re-association after
+  3 min, and reboots after 10 min. Previously a silent drop could leave the
+  red-dot screen up for as long as an hour until the stale-data watchdog
+  fired.
+- Board endpoint `GET /wifi` — signal strength (RSSI), SSID, channel, and IP
+  for placement and OTA-reliability debugging.
+
+### Changed
+
+- **Theme background appears immediately on track change** — the server now
+  computes the cover's theme color before answering the `/now` that first
+  reports a new track (waiting up to 0.8 s for the CDN fetch), so the board
+  paints the tinted background on the first draw instead of one poll (~2 s)
+  later. The cover is also downloaded from Spotify's CDN only once per track
+  (raw bytes cached; previously twice — once for the theme, once for the
+  board) and pre-dithered at the size the board uses, making `/art`
+  effectively instant.
+- **The board reuses one HTTP connection** (keep-alive) for polling and
+  commands instead of a new TCP handshake every request — snappier controls
+  and roughly half the airtime on the congested 2.4 GHz band.
+- **Server switched from the Flask dev server to waitress** (new
+  dependency) — production-grade, properly supports the keep-alive above.
+  A werkzeug-style access log is kept, and the Docker image now sets
+  `PYTHONUNBUFFERED` so logs reach `docker logs` immediately.
+- The server caches rendered text strips (128-entry LRU), so revisiting a
+  recently played track shows its text instantly.
+- While the backlight is dimmed (dark room, user asleep) the board polls
+  every 10 s instead of 2 s, cutting overnight WiFi traffic ~5x; a touch
+  restores the normal rate immediately.
+
+### Fixed
+
+- Server: the album-art URL and theme-color caches grew without bound over
+  long uptimes; both are now capped (newest 64 entries kept).
+
 ## [1.2.0] - 2026-07-19
 
 ### Added
@@ -100,6 +155,7 @@ that uses them.
 Versions 1.0.0 and 1.1.0 predate the public repository (its history starts
 at 1.1.1), so only 1.1.1 and later have tags.
 
+[1.4.0]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.4.0
 [1.2.0]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.2.0
 [1.1.1]: https://github.com/iammeng/cyd-now-playing/releases/tag/v1.1.1
 [1.1.0]: https://github.com/iammeng/cyd-now-playing/blob/main/CHANGELOG.md

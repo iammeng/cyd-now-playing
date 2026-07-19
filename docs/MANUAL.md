@@ -3,7 +3,7 @@
 🇹🇭 [อ่านภาษาไทย](MANUAL.th.md) · for installation see the [Setup guide](SETUP.md)
 
 Everything about *using* the display day-to-day. Current as of firmware
-**v1.2.0**.
+**v1.4.0**.
 
 ---
 
